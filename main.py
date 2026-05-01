@@ -22,6 +22,20 @@ from config import (
     STATE_FILE
 )
 
+import re
+
+def extract_stable_content(html: str) -> str:
+    """Elimina partes dinámicas del HTML y retorna solo el texto visible estable."""
+    # Eliminar scripts, estilos y comentarios
+    html = re.sub(r'<script[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
+    html = re.sub(r'<style[\s\S]*?</style>',   '', html, flags=re.IGNORECASE)
+    html = re.sub(r'<!--[\s\S]*?-->',           '', html)
+    # Eliminar todos los tags HTML (quedan solo los textos)
+    html = re.sub(r'<[^>]+>', ' ', html)
+    # Normalizar espacios
+    html = re.sub(r'\s+', ' ', html).strip()
+    return html
+
 # ─── URLs a monitorear ────────────────────────────────────────────────────────
 MONITORED_EVENTS = [
     {
@@ -179,7 +193,7 @@ def check_all_events():
             results.append(result)
             continue
 
-        current_hash  = sha256(html)
+        current_hash = sha256(extract_stable_content(html))
         previous_hash = state.get(f"{eid}_hash")
         kw            = detect_status_keywords(html)
 
