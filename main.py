@@ -103,23 +103,28 @@ def fetch_event_page(url):
 
 def load_state():
     try:
-        with open(STATE_FILE, "r") as f:
+        with open(STATE_FILE, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in {STATE_FILE}: {e}")
+        print(f"Invalid JSON in {STATE_FILE}: {e}")
+        return {}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 def should_send_heartbeat(state):
     if not HEARTBEAT_ENABLED:
         return False
-    if GITHUB_ACTIONS_MODE:
-        return True
+
     last = state.get("last_heartbeat_sent")
     if not last:
         return True
+
     try:
         elapsed = (datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds() / 60
         return elapsed >= HEARTBEAT_INTERVAL_MINUTES
