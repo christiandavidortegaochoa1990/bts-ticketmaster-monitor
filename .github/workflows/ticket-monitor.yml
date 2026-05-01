@@ -1,4 +1,4 @@
-﻿name: BTS Ticketmaster Monitor
+name: BTS Ticketmaster Monitor
 
 on:
   schedule:
