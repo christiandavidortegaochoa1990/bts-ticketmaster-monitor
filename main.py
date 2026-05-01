@@ -5,10 +5,8 @@ import logging
 import schedule
 import time
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from config import (
-    TICKETMASTER_API_KEY,
-    EVENT_ID,
     NTFY_URL,
     NTFY_PRIORITY,
     NTFY_TAGS,
@@ -24,395 +22,287 @@ from config import (
     STATE_FILE
 )
 
-# Setup logging
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# ─── URLs a monitorear ────────────────────────────────────────────────────────
+MONITORED_EVENTS = [
+    {
+        "id": "army_vie_2oct",
+        "label": "Army Membership - Vie 2 Oct",
+        "url": "https://www.ticketmaster.co/event/bts-world-tour-army-membership-viernes-2-octubre"
+    },
+    {
+        "id": "general_vie_2oct",
+        "label": "Venta General - Vie 2 Oct",
+        "url": "https://www.ticketmaster.co/event/bts-world-tour-venta-general-viernes-2-octubre"
+    },
+    {
+        "id": "army_sab_3oct",
+        "label": "Army Membership - Sab 3 Oct",
+        "url": "https://www.ticketmaster.co/event/bts-world-tour-army-membership-sabado-3-octubre"
+    },
+    {
+        "id": "general_sab_3oct",
+        "label": "Venta General - Sab 3 Oct",
+        "url": "https://www.ticketmaster.co/event/bts-world-tour-venta-general-sabado-3-octubre"
+    },
+]
+
+SOLD_OUT_KEYWORDS  = ["agotado", "sold out", "no hay entradas", "no disponible"]
+AVAILABLE_KEYWORDS = ["disponible", "comprar", "seleccionar asiento", "agregar al carrito"]
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 def timestamp_now():
-    """Return formatted current timestamp."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def search_events(keyword="BTS", country_code="CO", city="Bogotá"):
-    """Search for events using Ticketmaster API. Returns list of events."""
-    url = "https://app.ticketmaster.com/discovery/v2/events.json"
-    params = {
-        "apikey": TICKETMASTER_API_KEY,
-        "keyword": keyword,
-        "countryCode": country_code,
-        "city": city,
-        "size": 20
+def sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def detect_status_keywords(html):
+    html_lower = html.lower()
+    return {
+        "sold_out":  any(k in html_lower for k in SOLD_OUT_KEYWORDS),
+        "available": any(k in html_lower for k in AVAILABLE_KEYWORDS),
     }
+
+def fetch_event_page(url):
     try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        events = data.get("_embedded", {}).get("events", [])
-        return events, None
+        r = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+        r.raise_for_status()
+        return r.text, None
     except Exception as e:
-        logging.error(f"Error searching events: {e}")
-        return [], str(e)
-
-def normalize_event_data(event):
-    """Normalize event data into a stable snapshot for comparison."""
-    dates = event.get("dates", {})
-    sales = event.get("sales", {})
-
-    normalized = {
-        "id": event.get("id"),
-        "name": event.get("name"),
-        "url": event.get("url"),
-        "status": event.get("status"),
-        "event_date": dates.get("start", {}).get("localDate") if dates else None,
-        "public_sale_start": sales.get("public", {}).get("startDateTime") if sales else None,
-        "public_sale_end": sales.get("public", {}).get("endDateTime") if sales else None,
-        "presale_start": sales.get("presales", [{}])[0].get("startDateTime") if sales.get("presales") else None,
-        "presale_end": sales.get("presales", [{}])[0].get("endDateTime") if sales.get("presales") else None,
-        "on_sale": event.get("onSaleStartDate"),
-        "test": event.get("test"),
-    }
-    return normalized
-
-def calculate_hash(events_list):
-    """Calculate hash of normalized events list."""
-    normalized = [normalize_event_data(e) for e in events_list]
-    json_str = json.dumps(normalized, sort_keys=True, default=str)
-    return hashlib.sha256(json_str.encode()).hexdigest()
+        logging.error(f"Error fetching {url}: {e}")
+        return None, str(e)
 
 def load_state():
-    """Load state from state.json file with default fallbacks."""
     try:
         with open(STATE_FILE, "r") as f:
-            state = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
-        state = {}
+        return {}
 
-    defaults = {
-        "hash": None,
-        "event_count": 0,
-        "last_check": None,
-        "last_heartbeat_sent": None,
-        "last_check_summary": {
-            "checked_at": None,
-            "events_found": 0,
-            "changed": False,
-            "change_type": "none",
-            "alert_sent": False,
-            "api_error": None,
-            "message": None
-        }
-    }
-
-    for key, default_value in defaults.items():
-        if key not in state:
-            state[key] = default_value
-
-    return state
-
-def save_state(current_hash, event_count, last_check_summary, last_heartbeat_sent=None):
-    """Save state to state.json file."""
-    state = load_state()
-    state["hash"] = current_hash
-    state["event_count"] = event_count
-    state["last_check"] = timestamp_now()
-    state["last_check_summary"] = last_check_summary
-
-    if last_heartbeat_sent is not None:
-        state["last_heartbeat_sent"] = last_heartbeat_sent
-
+def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
 def should_send_heartbeat(state):
-    """Check if heartbeat interval has passed since last heartbeat."""
     if not HEARTBEAT_ENABLED:
         return False
-
-    # En GitHub Actions siempre se envía heartbeat (si no se envió alerta principal)
     if GITHUB_ACTIONS_MODE:
         return True
-
-    last_heartbeat_sent = state.get("last_heartbeat_sent")
-
-    if last_heartbeat_sent is None:
+    last = state.get("last_heartbeat_sent")
+    if not last:
         return True
-
     try:
-        last_time = datetime.strptime(last_heartbeat_sent, "%Y-%m-%d %H:%M:%S")
-        time_since = datetime.now() - last_time
-        minutes_since = time_since.total_seconds() / 60
-        return minutes_since >= HEARTBEAT_INTERVAL_MINUTES
+        elapsed = (datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds() / 60
+        return elapsed >= HEARTBEAT_INTERVAL_MINUTES
     except ValueError:
         return True
 
-def build_heartbeat_message(summary):
-    """Build heartbeat summary message in Spanish."""
-    change_type = summary.get("change_type", "none")
-    change_type_map = {
-        "none": "Ninguno",
-        "new_event": "Eventos nuevos encontrados",
-        "event_disappeared": "Evento desapareció",
-        "event_updated": "Evento actualizado",
-    }
-    change_label = change_type_map.get(change_type, change_type)
-
-    # Indicar si es ejecución automática de GitHub Actions
-    origin = "☁️ GitHub Actions" if GITHUB_ACTIONS_MODE else "💻 Local"
-
-    message = f"""✅ BTS Ticketmaster Monitor activo
-
-✏️ Última consulta: {summary.get('checked_at', 'Sin datos')}
-📃 Eventos encontrados: {summary.get('events_found', 0)}
-🔄 Cambio detectado: {'Sí' if summary.get('changed') else 'No'}
-📧 Tipo de cambio: {change_label}
-📢 Alerta principal: {'Enviada' if summary.get('alert_sent') else 'No'}
-⚠️ Error API: {summary.get('api_error') or 'Ninguno'}
-🖥️ Origen: {origin}
-
-⏳ Próxima acción: Seguir monitoreando..."""
-
-    return message
+def build_heartbeat_message(results):
+    origin = "GitHub Actions" if GITHUB_ACTIONS_MODE else "Local"
+    lines = [
+        "BTS Ticketmaster Monitor activo",
+        "",
+        f"Origen: {origin}",
+        f"Consulta: {timestamp_now()}",
+        "",
+        "Estado por evento:",
+    ]
+    for r in results:
+        icon   = "AGOTADO" if r.get("sold_out") else ("DISPONIBLE" if r.get("available") else "sin datos")
+        change = " ** CAMBIO **" if r.get("changed") else ""
+        error  = f" | Error: {r['error']}" if r.get("error") else ""
+        lines.append(f"  [{icon}] {r['label']}{change}{error}")
+    lines += ["", "Seguir monitoreando..."]
+    return "\n".join(lines)
 
 def send_ntfy_alert(message, priority=None, tags=None):
-    """Send push notification using ntfy with optional custom priority/tags."""
-    use_priority = priority if priority is not None else NTFY_PRIORITY
-    use_tags = tags if tags is not None else NTFY_TAGS
-
     try:
-        response = requests.post(
+        r = requests.post(
             NTFY_URL,
             data=message.encode("utf-8"),
             headers={
                 "Title": "BTS Ticketmaster Monitor",
-                "Priority": use_priority,
-                "Tags": use_tags,
-                "Content-Type": "text/plain; charset=utf-8"
+                "Priority": priority or NTFY_PRIORITY,
+                "Tags": tags or NTFY_TAGS,
+                "Content-Type": "text/plain; charset=utf-8",
             },
-            timeout=20
+            timeout=20,
         )
-        response.raise_for_status()
-        logging.info("ntfy alert sent successfully")
-        print("✅ ntfy alert sent")
+        r.raise_for_status()
+        logging.info("ntfy alert sent")
+        print("ntfy alert sent OK")
         return True
     except Exception as e:
-        logging.error(f"Error sending ntfy alert: {e}")
-        print(f"❌ Error sending ntfy: {e}")
+        logging.error(f"Error sending ntfy: {e}")
+        print(f"Error sending ntfy: {e}")
         return False
 
-def check_for_changes():
-    """Check Ticketmaster for BTS events and detect changes. Returns structured result."""
-    print(f"\n[{timestamp_now()}] Checking Ticketmaster...")
+def check_all_events():
+    state = load_state()
+    any_changed = False
+    results = []
 
-    events, api_error = search_events(keyword="BTS", country_code="CO", city="Bogotá")
-    current_hash = calculate_hash(events)
-    previous_state = load_state()
-    previous_hash = previous_state.get("hash")
-    previous_count = previous_state.get("event_count", 0)
+    for event in MONITORED_EVENTS:
+        eid   = event["id"]
+        label = event["label"]
+        url   = event["url"]
 
-    print(f"Events found: {len(events)}")
+        print(f"  Checking: {label} ...")
+        html, error = fetch_event_page(url)
 
-    result = {
-        "changed": False,
-        "message": None,
-        "events_found": len(events),
-        "change_type": "none",
-        "api_error": api_error,
-        "checked_at": timestamp_now()
-    }
+        result = {
+            "id":        eid,
+            "label":     label,
+            "url":       url,
+            "changed":   False,
+            "sold_out":  False,
+            "available": False,
+            "error":     error,
+        }
 
-    if api_error:
-        print(f"❌ API error: {api_error}")
-        result["message"] = f"❌ Error consultando Ticketmaster: {api_error}"
-        return result
+        if error:
+            results.append(result)
+            continue
 
-    if len(events) == 0 and previous_count > 0:
-        result["changed"] = True
-        result["change_type"] = "event_disappeared"
-        result["message"] = "⚠️ Los eventos BTS ya no están disponibles en Ticketmaster!"
-        print("⚠️ Change detected: Events disappeared")
+        current_hash  = sha256(html)
+        previous_hash = state.get(f"{eid}_hash")
+        kw            = detect_status_keywords(html)
 
-    elif len(events) > 0 and previous_count == 0:
-        result["changed"] = True
-        result["change_type"] = "new_event"
-        event = events[0]
-        event_name = event.get("name", "Unknown")
-        event_date = event.get("dates", {}).get("start", {}).get("localDate", "TBA")
-        result["message"] = f"🎫 NUEVO EVENTO: {event_name}\n📅 Fecha: {event_date}"
-        print("✅ Change detected: New events found")
+        result["sold_out"]  = kw["sold_out"]
+        result["available"] = kw["available"]
 
-    elif current_hash != previous_hash and len(events) > 0:
-        result["changed"] = True
-        result["change_type"] = "event_updated"
-        event = events[0]
-        event_name = event.get("name", "Unknown")
-        sales = event.get("sales", {})
-        public_sales = sales.get("public", {}) if sales else {}
-        start_date_sales = public_sales.get("startDateTime", "N/A") if public_sales else "N/A"
-
-        if start_date_sales != "N/A":
-            result["message"] = f"🔔 ACTUALIZACIÓN: {event_name}\n💫 Venta iniciada: {start_date_sales}"
+        if previous_hash and current_hash != previous_hash:
+            result["changed"] = True
+            any_changed = True
+            logging.info(f"Change detected: {label}")
+            print(f"    CAMBIO DETECTADO")
         else:
-            result["message"] = f"🔔 EVENTO ACTUALIZADO: {event_name}"
-        print("🔄 Change detected: Event data changed")
+            print(f"    Sin cambios (hash: {current_hash[:8]}...)")
 
-    else:
-        print("✓ No changes")
+        state[f"{eid}_hash"] = current_hash
 
-    return result
+    state["last_check"] = timestamp_now()
+    save_state(state)
+    return results, any_changed
 
-def validate_config():
-    """Validate required configuration."""
-    issues = []
-
-    if TICKETMASTER_API_KEY == "YOUR_API_KEY_HERE":
-        issues.append("ERROR: Set TICKETMASTER_API_KEY in config.py")
-
-    if not NTFY_URL or not NTFY_URL.startswith("https://ntfy.sh/"):
-        issues.append("ERROR: NTFY_URL must be set to a valid https://ntfy.sh/ URL in config.py")
-
-    if issues:
-        for issue in issues:
-            print(issue)
-            logging.error(issue)
-        return False
-    return True
+def build_change_message(results):
+    changed = [r for r in results if r.get("changed")]
+    lines = ["CAMBIO DETECTADO - BTS Bogota", ""]
+    for r in changed:
+        status = "AGOTADO" if r["sold_out"] else ("DISPONIBLE" if r["available"] else "actualizado")
+        lines.append(f"{r['label']}: {status}")
+        lines.append(f"URL: {r['url']}")
+        lines.append("")
+    lines.append(f"Hora: {timestamp_now()}")
+    return "\n".join(lines)
 
 def run_check_once():
-    """Run one check and exit (main mode for GitHub Actions and Task Scheduler)."""
     print(f"\n{'='*60}")
     print(f"BTS Ticketmaster Monitor - Single Check")
-    print(f"Started: {timestamp_now()}")
-    print(f"Mode: {'☁️ GitHub Actions' if GITHUB_ACTIONS_MODE else '💻 Local'}")
-    print(f"{'='*60}")
-
-    if not validate_config():
-        return
+    print(f"Started : {timestamp_now()}")
+    print(f"Mode    : {'GitHub Actions' if GITHUB_ACTIONS_MODE else 'Local'}")
+    print(f"{'='*60}\n")
 
     state = load_state()
-    result = check_for_changes()
+    print("Checking events...\n")
+    results, any_changed = check_all_events()
 
     alert_sent = False
-    last_heartbeat_to_save = None
 
-    # Prioridad 1: alerta de cambio real
-    if result["changed"] and result["message"]:
-        print(f"\n📢 Sending main alert to ntfy...")
-        send_ntfy_alert(result["message"])
-        result["alert_sent"] = True
+    if any_changed:
+        msg = build_change_message(results)
+        print(f"\nSending change alert...")
+        send_ntfy_alert(msg)
         alert_sent = True
-        last_heartbeat_to_save = timestamp_now()
-        print("\nHeartbeat timestamp updated (main alert sent)")
-    else:
-        result["alert_sent"] = False
+        state = load_state()
+        state["last_heartbeat_sent"] = timestamp_now()
+        save_state(state)
 
-    # Prioridad 2: heartbeat
-    # En GitHub Actions: siempre (cada run confirma que el pipeline está vivo)
-    # En local: solo si pasó el intervalo configurado
     if not alert_sent and should_send_heartbeat(state):
-        print(f"\n🔔 Sending heartbeat notification...")
-        heartbeat_msg = build_heartbeat_message(result)
-        send_ntfy_alert(heartbeat_msg, priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
-        last_heartbeat_to_save = timestamp_now()
-        print("Heartbeat sent")
+        msg = build_heartbeat_message(results)
+        print(f"\nSending heartbeat...")
+        send_ntfy_alert(msg, priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
+        state = load_state()
+        state["last_heartbeat_sent"] = timestamp_now()
+        save_state(state)
 
-    # Guardar estado
-    events, _ = search_events()
-    save_state(calculate_hash(events), result["events_found"], result,
-               last_heartbeat_sent=last_heartbeat_to_save)
-
-    print(f"\nCheck completed at {timestamp_now()}")
+    print(f"\nDone at {timestamp_now()}")
     print(f"{'='*60}\n")
 
 def run_daemon():
-    """Run as daemon with periodic checks (local use)."""
     print(f"\n{'='*60}")
     print(f"BTS Ticketmaster Monitor - Daemon Mode")
-    print(f"Started: {timestamp_now()}")
-    print(f"Normal interval: {CHECK_INTERVAL_MINUTES} min")
-    print(f"Hot interval: {HOT_CHECK_INTERVAL_MINUTES} min (within {HOT_WINDOW_DAYS_BEFORE_EVENT} days of event)")
-    print(f"Heartbeat: Every {HEARTBEAT_INTERVAL_MINUTES} min (if no main alert)")
-    print(f"{'='*60}")
-
-    if not validate_config():
-        return
+    print(f"Started : {timestamp_now()}")
+    print(f"Interval: {CHECK_INTERVAL_MINUTES} min")
+    print(f"{'='*60}\n")
 
     def scheduled_check():
         state = load_state()
-        result = check_for_changes()
+        print(f"\n[{timestamp_now()}] Checking...")
+        results, any_changed = check_all_events()
 
         alert_sent = False
-        last_heartbeat_to_save = None
 
-        if result["changed"] and result["message"]:
-            print(f"\n📢 Sending main alert...")
-            send_ntfy_alert(result["message"])
-            result["alert_sent"] = True
+        if any_changed:
+            msg = build_change_message(results)
+            send_ntfy_alert(msg)
             alert_sent = True
-            last_heartbeat_to_save = timestamp_now()
-        else:
-            result["alert_sent"] = False
+            state = load_state()
+            state["last_heartbeat_sent"] = timestamp_now()
+            save_state(state)
 
         if not alert_sent and should_send_heartbeat(state):
-            print(f"\n🔔 Sending heartbeat notification...")
-            heartbeat_msg = build_heartbeat_message(result)
-            send_ntfy_alert(heartbeat_msg, priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
-            last_heartbeat_to_save = timestamp_now()
-
-        events, _ = search_events()
-        save_state(calculate_hash(events), result["events_found"], result,
-                   last_heartbeat_sent=last_heartbeat_to_save)
+            msg = build_heartbeat_message(results)
+            send_ntfy_alert(msg, priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
+            state = load_state()
+            state["last_heartbeat_sent"] = timestamp_now()
+            save_state(state)
 
     scheduled_check()
     schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(scheduled_check)
 
-    print("\nMonitor running. Press Ctrl+C to stop.\n")
-
+    print("Monitor running. Press Ctrl+C to stop.\n")
     try:
         while True:
             schedule.run_pending()
             time.sleep(30)
     except KeyboardInterrupt:
-        print(f"\n\nMonitor stopped at {timestamp_now()}")
-        logging.info("Monitor stopped by user")
+        print(f"\nMonitor stopped at {timestamp_now()}")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Ticketmaster BTS Bogotá Change Monitor with Heartbeat",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py --test-alert         # Send test change alert
-  python main.py --test-heartbeat     # Send test heartbeat
-  python main.py --check-once         # Run one check (for GitHub Actions / Task Scheduler)
-  python main.py --daemon             # Run continuously (local only)
-        """
-    )
-    parser.add_argument("--test-alert", action="store_true",
-                        help="Send a test change alert and exit")
-    parser.add_argument("--test-heartbeat", action="store_true",
-                        help="Send a test heartbeat notification and exit")
-    parser.add_argument("--check-once", action="store_true",
-                        help="Run one check, update state, and exit")
-    parser.add_argument("--daemon", action="store_true",
-                        help="Run as daemon with periodic checks (local only)")
-
+    parser = argparse.ArgumentParser(description="BTS Bogota Ticketmaster Monitor")
+    parser.add_argument("--test-alert",     action="store_true")
+    parser.add_argument("--test-heartbeat", action="store_true")
+    parser.add_argument("--check-once",     action="store_true")
+    parser.add_argument("--daemon",         action="store_true")
     args = parser.parse_args()
 
     if args.test_alert:
-        send_ntfy_alert("✅ Prueba BTS Monitor: ntfy funcionando correctamente")
+        send_ntfy_alert(
+            "Prueba BTS Monitor: alerta de cambio funcionando\nURL: https://www.ticketmaster.co"
+        )
         return
 
     if args.test_heartbeat:
-        test_summary = {
-            "checked_at": timestamp_now(),
-            "events_found": 0,
-            "changed": False,
-            "change_type": "none",
-            "alert_sent": False,
-            "api_error": None,
-            "message": None
-        }
-        msg = build_heartbeat_message(test_summary)
-        send_ntfy_alert(msg, priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
+        dummy = [{"label": e["label"], "changed": False, "sold_out": False,
+                  "available": False, "error": None} for e in MONITORED_EVENTS]
+        send_ntfy_alert(build_heartbeat_message(dummy),
+                        priority=HEARTBEAT_PRIORITY, tags=HEARTBEAT_TAGS)
         return
 
     if args.check_once:
