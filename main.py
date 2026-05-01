@@ -96,45 +96,57 @@ def sha256(text):
 
 def extract_ticketmaster_status(html):
     """
-    Detecta el estado principal del evento usando la estructura específica
-    de Ticketmaster visible en el DOM:
+    Detecta el estado del evento desde el HTML inicial de Ticketmaster.
 
+    Aunque el DOM renderizado muestra:
     <div class="event-status status-soldout">
         <span>Agotado</span>
     </div>
 
+    el HTML recibido por requests contiene una señal más estable:
+    "salesStatus":"SOLD_OUT"
+
     No intenta comprar, reservar, entrar a fila ni interactuar con la página.
     Solo analiza HTML público.
     """
-    for match in re.finditer(
-        r'<div\b[^>]*class=["\']([^"\']*)["\'][^>]*>',
+    sales_status_match = re.search(
+        r'"salesStatus"\s*:\s*"([^"]+)"',
         html,
         flags=re.IGNORECASE,
-    ):
-        class_text = match.group(1).lower()
-        classes = set(class_text.split())
+    )
 
-        if "event-status" in classes and "status-soldout" in classes:
-            block = html[match.start(): match.start() + 500]
-            visible_text = extract_stable_content(block).lower()
+    if sales_status_match:
+        sales_status = sales_status_match.group(1).upper().strip()
 
-            if "agotado" in visible_text:
-                return {
-                    "status_code": "SOLD_OUT",
-                    "status_text": "AGOTADO",
-                    "sold_out": True,
-                    "available": False,
-                    "status_found": True,
-                    "selector": "div.event-status.status-soldout span",
-                }
+        if sales_status == "SOLD_OUT":
+            status_text = "AGOTADO"
+            sold_out = True
+            available = False
+        elif sales_status in {"ON_SALE", "ONSALE", "AVAILABLE"}:
+            status_text = f"POSIBLE DISPONIBLE - salesStatus={sales_status}"
+            sold_out = False
+            available = True
+        else:
+            status_text = f"REVISAR MANUALMENTE - salesStatus={sales_status}"
+            sold_out = False
+            available = False
+
+        return {
+            "status_code": sales_status,
+            "status_text": status_text,
+            "sold_out": sold_out,
+            "available": available,
+            "status_found": True,
+            "selector": '"salesStatus" from initial HTML',
+        }
 
     return {
-        "status_code": "REVIEW",
-        "status_text": "AGOTADO NO DETECTADO - REVISAR MANUALMENTE",
+        "status_code": "UNKNOWN",
+        "status_text": "salesStatus NO DETECTADO - REVISAR MANUALMENTE",
         "sold_out": False,
         "available": False,
         "status_found": False,
-        "selector": "div.event-status.status-soldout span",
+        "selector": '"salesStatus" from initial HTML',
     }
 
 
