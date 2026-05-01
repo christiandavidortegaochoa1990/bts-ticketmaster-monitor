@@ -60,8 +60,17 @@ MONITORED_EVENTS = [
     },
 ]
 
-SOLD_OUT_KEYWORDS  = ["agotado", "sold out", "no hay entradas", "no disponible"]
-AVAILABLE_KEYWORDS = ["disponible", "comprar", "seleccionar asiento", "agregar al carrito"]
+SOLD_OUT_KEYWORDS = ["agotado"]
+
+BUY_CTA_KEYWORDS = [
+    "seleccionar asiento",
+    "agregar al carrito",
+    "comprar entradas",
+    "comprar boletos",
+    "buy tickets",
+    "find tickets",
+    "select seats",
+]
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -85,12 +94,52 @@ def timestamp_now():
 def sha256(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def detect_status_keywords(html):
-    html_lower = html.lower()
+def extract_ticketmaster_status(html):
+    """
+    Detecta el estado principal del evento usando la estructura específica
+    de Ticketmaster visible en el DOM:
+
+    <div class="event-status status-soldout">
+        <span>Agotado</span>
+    </div>
+
+    No intenta comprar, reservar, entrar a fila ni interactuar con la página.
+    Solo analiza HTML público.
+    """
+    for match in re.finditer(
+        r'<div\b[^>]*class=["\']([^"\']*)["\'][^>]*>',
+        html,
+        flags=re.IGNORECASE,
+    ):
+        class_text = match.group(1).lower()
+        classes = set(class_text.split())
+
+        if "event-status" in classes and "status-soldout" in classes:
+            block = html[match.start(): match.start() + 500]
+            visible_text = extract_stable_content(block).lower()
+
+            if "agotado" in visible_text:
+                return {
+                    "status_code": "SOLD_OUT",
+                    "status_text": "AGOTADO",
+                    "sold_out": True,
+                    "available": False,
+                    "status_found": True,
+                    "selector": "div.event-status.status-soldout span",
+                }
+
     return {
-        "sold_out":  any(k in html_lower for k in SOLD_OUT_KEYWORDS),
-        "available": any(k in html_lower for k in AVAILABLE_KEYWORDS),
+        "status_code": "REVIEW",
+        "status_text": "AGOTADO NO DETECTADO - REVISAR MANUALMENTE",
+        "sold_out": False,
+        "available": False,
+        "status_found": False,
+        "selector": "div.event-status.status-soldout span",
     }
+
+
+def detect_status_keywords(html):
+    return extract_ticketmaster_status(html)
 
 def fetch_event_page(url):
     try:
@@ -142,7 +191,9 @@ def build_heartbeat_message(results):
         "Estado por evento:",
     ]
     for r in results:
-        icon   = "AGOTADO" if r.get("sold_out") else ("DISPONIBLE" if r.get("available") else "sin datos")
+        icon = r.get("status_text") or (
+            "AGOTADO" if r.get("sold_out") else "AGOTADO NO DETECTADO - REVISAR"
+        )
         change = " ** CAMBIO **" if r.get("changed") else ""
         error  = f" | Error: {r['error']}" if r.get("error") else ""
         lines.append(f"  [{icon}] {r['label']}{change}{error}")
@@ -198,22 +249,47 @@ def check_all_events():
             results.append(result)
             continue
 
-        current_hash = sha256(extract_stable_content(html))
-        previous_hash = state.get(f"{eid}_hash")
-        kw            = detect_status_keywords(html)
+        kw = detect_status_keywords(html)
 
-        result["sold_out"]  = kw["sold_out"]
+        result["sold_out"] = kw["sold_out"]
         result["available"] = kw["available"]
+        result["status_code"] = kw.get("status_code")
+        result["status_text"] = kw.get("status_text")
+        result["status_found"] = kw.get("status_found")
+        result["selector"] = kw.get("selector")
+
+        status_snapshot = {
+            "status_code": result["status_code"],
+            "status_text": result["status_text"],
+            "status_found": result["status_found"],
+            "selector": result["selector"],
+        }
+
+        current_hash = sha256(
+            json.dumps(status_snapshot, sort_keys=True, ensure_ascii=False)
+        )
+
+        previous_hash = state.get(f"{eid}_status_hash")
+
+        detected_status = result["status_text"] or "SIN ESTADO"
 
         if previous_hash and current_hash != previous_hash:
             result["changed"] = True
             any_changed = True
-            logging.info(f"Change detected: {label}")
-            print(f"    CAMBIO DETECTADO")
+            logging.info(f"Change detected: {label} | Status: {detected_status}")
+            print(
+                f"    CAMBIO DETECTADO | Estado: {detected_status} | "
+                f"Hash estado: {current_hash[:8]}..."
+            )
         else:
-            print(f"    Sin cambios (hash: {current_hash[:8]}...)")
+            print(
+                f"    Sin cambios | Estado: {detected_status} | "
+                f"Hash estado: {current_hash[:8]}..."
+            )
 
-        state[f"{eid}_hash"] = current_hash
+        state[f"{eid}_status_hash"] = current_hash
+        state[f"{eid}_status_snapshot"] = status_snapshot
+        results.append(result)
 
     state["last_check"] = timestamp_now()
     save_state(state)
@@ -223,7 +299,9 @@ def build_change_message(results):
     changed = [r for r in results if r.get("changed")]
     lines = ["CAMBIO DETECTADO - BTS Bogota", ""]
     for r in changed:
-        status = "AGOTADO" if r["sold_out"] else ("DISPONIBLE" if r["available"] else "actualizado")
+        status = r.get("status_text") or (
+            "AGOTADO" if r.get("sold_out") else "AGOTADO NO DETECTADO - revisar manualmente"
+        )
         lines.append(f"{r['label']}: {status}")
         lines.append(f"URL: {r['url']}")
         lines.append("")
