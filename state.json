@@ -3,8 +3,8 @@
   "general_vie_2oct_hash": "f2dc2398250d00bec421fef22e0fca5828d18b8decd3833f6862d40ba3bec63a",
   "army_sab_3oct_hash": "f2dc2398250d00bec421fef22e0fca5828d18b8decd3833f6862d40ba3bec63a",
   "general_sab_3oct_hash": "327d4ce636df88b3cae6feb36d8a778323c4fd1282fa5d7ed55b08a6bfc89bfb",
-  "last_check": "2026-10-02 01:46:02",
-  "last_heartbeat_sent": "2026-10-02 01:46:02",
+  "last_check": "2026-10-02 07:33:55",
+  "last_heartbeat_sent": "2026-10-02 07:33:55",
   "army_vie_2oct_status_hash": "28e47e8135dad28add24a3c1c6492e9a01d543e2f59f137e955a80891a67db2f",
   "army_vie_2oct_status_snapshot": {
     "status_code": "SOLD_OUT",
@@ -12,10 +12,10 @@
     "status_found": true,
     "selector": "\"salesStatus\" from initial HTML"
   },
-  "general_vie_2oct_status_hash": "edca2193cab15ab8f10c0406dd91252b2b1ee26acbc49c5a92f9202d92094f14",
+  "general_vie_2oct_status_hash": "28e47e8135dad28add24a3c1c6492e9a01d543e2f59f137e955a80891a67db2f",
   "general_vie_2oct_status_snapshot": {
-    "status_code": "IN_SALE",
-    "status_text": "REVISAR MANUALMENTE - salesStatus=IN_SALE",
+    "status_code": "SOLD_OUT",
+    "status_text": "AGOTADO",
     "status_found": true,
     "selector": "\"salesStatus\" from initial HTML"
   },
@@ -26,10 +26,10 @@
     "status_found": true,
     "selector": "\"salesStatus\" from initial HTML"
   },
-  "general_sab_3oct_status_hash": "edca2193cab15ab8f10c0406dd91252b2b1ee26acbc49c5a92f9202d92094f14",
+  "general_sab_3oct_status_hash": "28e47e8135dad28add24a3c1c6492e9a01d543e2f59f137e955a80891a67db2f",
   "general_sab_3oct_status_snapshot": {
-    "status_code": "IN_SALE",
-    "status_text": "REVISAR MANUALMENTE - salesStatus=IN_SALE",
+    "status_code": "SOLD_OUT",
+    "status_text": "AGOTADO",
     "status_found": true,
     "selector": "\"salesStatus\" from initial HTML"
   }
